@@ -29,7 +29,7 @@
         --gauge-50: #f39c12;
         --gauge-100: #e74c3c;
 
-        --max-width: 600px;
+        --max-width: 800px;
       }
 
       body {
@@ -447,7 +447,7 @@
         background-color: var(--primary-active);
       }
     </style>
-
+    <link rel="stylesheet" href="dpad.css">
     <script language="javascript" type="text/javascript">
       var url = "ws://192.168.4.1:80/ws";
       var emergency_stop = false;
@@ -477,6 +477,7 @@
         output = document.getElementById("output");
 
         initDrag();
+        initDpad();
 
         // Initial state
         isConnecting(true);
@@ -660,6 +661,76 @@
         return false;
       }
 
+      function onIdle(event) {
+        console.log("rc idle");
+        websocket.send(
+          JSON.stringify({
+            command: "idle",
+          })
+        );
+      }
+
+      function onDirection(direction) {
+        console.log("direction: "+direction);
+        websocket.send(
+          JSON.stringify({
+            command: direction,
+          })
+        );
+      }
+
+      function onTurnStop(direction) {
+        console.log("stop turn");
+        websocket.send(
+          JSON.stringify({
+            command: "stop_turn",
+          })
+        );
+      }
+
+      function initDpad(){
+        for (let direction in {"up":"", "down":"", "left":"", "right":""}){
+          console.log("dpad_"+direction);
+          document.getElementById("dpad_" + direction).addEventListener("contextmenu", function(e) {
+            e.preventDefault();
+            return false;
+          });
+          document.getElementById("dpad_"+direction).addEventListener("mousedown", function(){
+            onDirection(direction);
+          });
+          document.getElementById("dpad_"+direction).addEventListener("mouseup", function (){
+            if (direction in { "left": "", "right": "" })
+            {
+              onTurnStop();
+            } else {
+              onIdle();
+            }
+          });
+          document.getElementById("dpad_" + direction).addEventListener("touchstart", function () {
+            console.log("touchstart");
+            onDirection(direction);
+          });
+          document.getElementById("dpad_" + direction).addEventListener("touchend", function () {
+            console.log("touchend");
+            if (direction in { "left": "", "right": "" })
+            {
+              onTurnStop();
+            } else {
+              onIdle();
+            }
+          });
+          document.getElementById("dpad_" + direction).addEventListener("touchcancel", function () {
+            console.log("touchcancel");
+            if (direction in {"left":"", "right":""} ) 
+            {
+              onTurnStop();
+            } else {
+              onIdle();
+            }
+          });
+        }
+      }
+
       function onPressSave(event) {
         if (isNaN(maxForwardInput.value) || isNaN(maxBackwardInput.value)) {
           output.innerHTML = "Error, not a number";
@@ -759,7 +830,18 @@
           />
         </svg>
       </div>
-
+      <!-- <div class="set setbg2 clear setbg clear"> -->
+        <!-- <div class="set setbg white"> -->
+        <div class="set wire">
+        <nav class="o-pad">
+          <a id="dpad_up" class="up" href="#"></a>
+          <a id="dpad_right" class="right" href="#"></a>
+          <a id="dpad_down" class="down" href="#"></a>
+          <a id="dpad_left" class="left" href="#"></a>
+        </nav>
+      <br> 
+      <br>
+      <br>
       <button id="stopButton" onclick="return onPressEmergencyStop(this)">
         Emergency Stop</button
       ><br />

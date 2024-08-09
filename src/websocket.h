@@ -4,6 +4,7 @@
 #include <esp_http_server.h>
 
 typedef void (*wsserver_receive_callback)(httpd_ws_frame_t* ws_pkt);
+typedef void(*wsserver_disconnect_callback)();
 
 void start_websocket(httpd_handle_t server);
 void stop_websocket(void);
@@ -18,5 +19,8 @@ esp_err_t broadcast_message(char* msg);
 
 void register_callback(wsserver_receive_callback callback);
 void unregister_callback(wsserver_receive_callback callback);
+
+// Run when all WS clients disconnect
+void register_disconnect_callback(wsserver_disconnect_callback callback);
 
 #endif

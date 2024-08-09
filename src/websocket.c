@@ -14,6 +14,7 @@ static int clients_fd[MAX_CLIENTS];
 
 #define MAX_CALLBACKS 4
 static wsserver_receive_callback receive_callbacks[MAX_CALLBACKS];
+static wsserver_disconnect_callback disconnect_callbacks[MAX_CALLBACKS];
 
 static httpd_handle_t server = NULL;
 
@@ -54,10 +55,22 @@ void on_ws_client_disconnected(int sockfd) {
 
   close(sockfd);
 
+  bool open_connections = false;
   for (int i = 0; i < MAX_CLIENTS; ++i) {
     if (clients_fd[i] == sockfd) {
       clients_fd[i] = -1;
-      return;
+      open_connections = true;
+      break;
+    } else if (clients_fd[i] != -1) {
+      open_connections = true;
+    }
+  }
+  if (!open_connections) {
+    // Start a timer to reset RC values
+    for (int i = 0; i < MAX_CALLBACKS; i++) {
+      if (disconnect_callbacks[i] != NULL) {
+        disconnect_callbacks[i]();
+      }
     }
   }
 
@@ -174,6 +187,32 @@ void unregister_callback(wsserver_receive_callback callback) {
     if (receive_callbacks[i] == callback) {
       receive_callbacks[i] = NULL;
     }
+  }
+}
+
+void register_disconnect_callback(wsserver_disconnect_callback callback) {
+  int available_index = -1;
+
+  for (int i = 0; i < MAX_CALLBACKS; ++i)
+  {
+    if (disconnect_callbacks[i] == callback)
+    {
+      return;
+    }
+    if (disconnect_callbacks[i] == NULL)
+    {
+      available_index = i;
+    }
+  }
+
+  if (available_index != -1)
+  {
+    ESP_LOGI(TAG, "Register disconnect callback in the first available place");
+    disconnect_callbacks[available_index] = callback;
+  }
+  else
+  {
+    ESP_LOGI(TAG, "Register disconnect callback has no available place");
   }
 }
 

@@ -23,7 +23,7 @@ static void led_task(void *pvParameter);
 
 // ADC throttle capability
 
-#define WITH_ADC_THROTTLE 0
+#define WITH_ADC_THROTTLE 1
 
 #if WITH_ADC_THROTTLE
 #include "driver/adc.h"
@@ -34,8 +34,8 @@ static void led_task(void *pvParameter);
 
 // - Inputs
 #if WITH_ADC_THROTTLE
-#define GAS_PEDAL_FORWARD_PIN ADC1_CHANNEL_4 // GPIO 32
-#define GAS_PEDAL_BACKWARD_PIN ADC1_CHANNEL_5 // GPIO 33
+#define GAS_PEDAL_FORWARD_PIN ADC1_CHANNEL_5 // GPIO 33
+#define GAS_PEDAL_BACKWARD_PIN ADC1_CHANNEL_7 // GPIO 35
 #else
 #define GAS_PEDAL_FORWARD_PIN GPIO_NUM_32
 #define GAS_PEDAL_BACKWARD_PIN GPIO_NUM_33
@@ -43,6 +43,8 @@ static void led_task(void *pvParameter);
 // - Outputs
 #define FORWARD_PWM_PIN GPIO_NUM_18
 #define BACKWARD_PWM_PIN GPIO_NUM_19
+#define LEFT_PWM_PIN GPIO_NUM_16
+#define RIGHT_PWM_PIN GPIO_NUM_17
 #define STATUS_LED_PIN GPIO_NUM_2
 
 // Constants
@@ -58,6 +60,8 @@ static void led_task(void *pvParameter);
 
 #define MOTOR_PWM_CHANNEL_FORWARD LEDC_CHANNEL_1
 #define MOTOR_PWM_CHANNEL_BACKWARD LEDC_CHANNEL_2
+#define MOTOR_PWM_CHANNEL_LEFT LEDC_CHANNEL_3
+#define MOTOR_PWM_CHANNEL_RIGHT LEDC_CHANNEL_4
 #define MOTOR_PWM_TIMER LEDC_TIMER_1
 #define MOTOR_PWM_DUTY_RESOLUTION LEDC_TIMER_10_BIT
 
@@ -68,6 +72,10 @@ float emergency_stop = false;
 float max_forward = 0;
 float max_backward = 0;
 int led_sleep_delay = 20;
+
+bool rc_forward = false;
+bool rc_backward = false;
+float rc_steering = 0.0;
 
 #if WITH_ADC_THROTTLE
 static esp_adc_cal_characteristics_t adc1_chars;
@@ -161,7 +169,37 @@ static void data_received(httpd_ws_frame_t* ws_pkt) {
 
 end:
     cJSON_Delete(root);
+  } else if ( strcmp("idle", command) == 0 ) {
+    rc_forward = false;
+    rc_backward = false;
+  } else if (strcmp("stop_turn", command) == 0) {
+    rc_steering = 0;
+  } else if (strcmp("up", command) == 0) {
+    rc_forward = true;
+    rc_backward = false;
+  }  else if (strcmp("down", command) == 0) {
+    rc_forward = false;
+    rc_backward = true;
+  } else if (strcmp("right", command) == 0) {
+      rc_steering = 1.0;
+      // if (steering < 1.0)
+      // {
+      //   steering += .1;
+      // }
+  } else if (strcmp("left", command) == 0) {
+    rc_steering = -1.0;
+    // if (steering > -1.0) {
+    //   steering -= .1;
+    // }
   }
+}
+
+// Make sure we stop the RC control if we disconnect
+static void disconnect_received() {
+  ESP_LOGI(TAG, "All WS clients disconnected, killing RC values");
+  rc_backward = 0;
+  rc_forward = 0;
+  rc_steering = 0;
 }
 
 // **********
@@ -219,6 +257,7 @@ void setup_pin() {
 // Setup LED channel to be used to generate PWM
 void setup_pwm() {
   ledc_channel_config_t ledc_channel_forward = {0}, ledc_channel_backward = {0};
+  ledc_channel_config_t ledc_channel_left = {0}, ledc_channel_right = {0};
 
   ledc_channel_forward.gpio_num = FORWARD_PWM_PIN;
   ledc_channel_forward.speed_mode = LEDC_HIGH_SPEED_MODE;
@@ -234,15 +273,32 @@ void setup_pwm() {
   ledc_channel_backward.timer_sel = MOTOR_PWM_TIMER;
   ledc_channel_backward.duty = 0;
 
+  ledc_channel_left.gpio_num = LEFT_PWM_PIN;
+  ledc_channel_left.speed_mode = LEDC_HIGH_SPEED_MODE;
+  ledc_channel_left.channel = MOTOR_PWM_CHANNEL_LEFT;
+  ledc_channel_left.intr_type = LEDC_INTR_DISABLE;
+  ledc_channel_left.timer_sel = MOTOR_PWM_TIMER;
+  ledc_channel_left.duty = 0;
+
+  ledc_channel_right.gpio_num = RIGHT_PWM_PIN;
+  ledc_channel_right.speed_mode = LEDC_HIGH_SPEED_MODE;
+  ledc_channel_right.channel = MOTOR_PWM_CHANNEL_RIGHT;
+  ledc_channel_right.intr_type = LEDC_INTR_DISABLE;
+  ledc_channel_right.timer_sel = MOTOR_PWM_TIMER;
+  ledc_channel_right.duty = 0;
+
   ledc_timer_config_t ledc_timer = {0};
   ledc_timer.speed_mode = LEDC_HIGH_SPEED_MODE;
   ledc_timer.duty_resolution = MOTOR_PWM_DUTY_RESOLUTION;
   ledc_timer.timer_num = MOTOR_PWM_TIMER;
-  ledc_timer.freq_hz = 25000;
+  ledc_timer.freq_hz = 15000;
+  // ledc_timer.freq_hz = 25000;
 
+  ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
   ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel_forward));
 	ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel_backward));
-	ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
+	ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel_left));
+	ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel_right));
 }
 
 void setup_driving(void) {
@@ -258,6 +314,7 @@ void setup_driving(void) {
 
   // Listen to Websocket events
   register_callback(data_received);
+  register_disconnect_callback(disconnect_received);
 
   // Create a task with the higher priority for the driving task
   xTaskCreate(&drive_task, "drive_task", 2048, NULL, 20, NULL);
@@ -297,6 +354,23 @@ void send_values_to_motor(int speed) {
 
   ESP_ERROR_CHECK(ledc_set_duty(LEDC_HIGH_SPEED_MODE, MOTOR_PWM_CHANNEL_BACKWARD, backward_duty));
   ESP_ERROR_CHECK(ledc_update_duty(LEDC_HIGH_SPEED_MODE, MOTOR_PWM_CHANNEL_BACKWARD));
+
+  uint32_t left_duty = 0;
+  if ( rc_steering < 0 ) {
+    left_duty = lroundf(.5*(float)max_duty);
+    // steering += .01;
+  }
+  uint32_t right_duty = 0;
+  if (rc_steering > 0) {
+    right_duty = lroundf(.5 * (float)max_duty);
+    // steering -= .01;
+  }
+
+  ESP_ERROR_CHECK(ledc_set_duty(LEDC_HIGH_SPEED_MODE, MOTOR_PWM_CHANNEL_LEFT, left_duty));
+  ESP_ERROR_CHECK(ledc_update_duty(LEDC_HIGH_SPEED_MODE, MOTOR_PWM_CHANNEL_LEFT));
+
+  ESP_ERROR_CHECK(ledc_set_duty(LEDC_HIGH_SPEED_MODE, MOTOR_PWM_CHANNEL_RIGHT, right_duty));
+  ESP_ERROR_CHECK(ledc_update_duty(LEDC_HIGH_SPEED_MODE, MOTOR_PWM_CHANNEL_RIGHT));
 }
 
 // Return the targeted speed based on the pedal status.
@@ -412,9 +486,12 @@ static void broadcast_speed_task(void *pvParameter) {
   }
 }
 
+int64_t last_print_time = 0;
+
 // Task that drives the car
 static void drive_task(void *pvParameter) {
   int64_t last_update = esp_timer_get_time();
+  last_print_time =  last_update;
   float delta;
 
   int forward_position = 0;
@@ -438,11 +515,25 @@ static void drive_task(void *pvParameter) {
     }
 
     // Update pedal & direction status
-    forward_position = get_throttle_position(GAS_PEDAL_FORWARD_PIN);
-    backward_position = get_throttle_position(GAS_PEDAL_BACKWARD_PIN);
+    if ( rc_forward ) {
+      forward_position = 100;
+      backward_position = 0;
+    } else if ( rc_backward ) {
+      forward_position = 0;
+      backward_position = 100;
+    } else {
+      forward_position = get_throttle_position(GAS_PEDAL_FORWARD_PIN);
+      backward_position = get_throttle_position(GAS_PEDAL_BACKWARD_PIN);
+    }
 
     // Update targeted speed accordingly
     target = get_speed_target(forward_position, backward_position);
+
+    if (last_update - last_print_time > 1000000)
+    {
+      ESP_LOGI(TAG, "Forward: %d Backward: %d Target: %d", forward_position, backward_position, target);
+      last_print_time = last_update;
+    }
 
     // Take into account a loop could take more than expected
     // This is used to slow down within a fixed timeframe, regardless of the loop duration
