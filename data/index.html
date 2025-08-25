@@ -47,9 +47,10 @@
       }
 
       h2 {
-        align-self: flex-end;
+        align-self: center;
         font-weight: 600;
         margin-bottom: 0px;
+        text-align: center;
       }
 
       hr {
@@ -446,10 +447,63 @@
       button:active {
         background-color: var(--primary-active);
       }
+
+      #joystick_zone {
+        display: none;
+      }
+
+      #rcOnlyToggleContainer {
+        display: none;
+        margin: 10px 0;
+        align-items: center;
+        gap: 10px;
+      }
+      .toggle-switch {
+        position: relative;
+        display: inline-block;
+        width: 48px;
+        height: 24px;
+      }
+      .toggle-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .toggle-slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        /* background: #ccc; */
+        background: var(--background);
+        border-radius: 24px;
+        transition: background 0.2s;
+        box-shadow: 6px 6px 10px -1px rgba(0, 0, 0, 0.8),
+          -6px -6px 10px -1px rgba(255, 255, 255, 0.15);
+      }
+      .toggle-slider:before {
+        position: absolute;
+        content: "";
+        height: 20px;
+        width: 20px;
+        left: 2px;
+        bottom: 2px;
+        background: var(--primary);
+        border-radius: 50%;
+        transition: transform 0.2s;
+      }
+      .toggle-switch input:checked + .toggle-slider {
+        background: var(--primary);
+      }
+      .toggle-switch input:checked + .toggle-slider:before {
+        transform: translateX(24px);
+        background: var(--primary-active);
+      }
     </style>
-    <link rel="stylesheet" href="dpad.css">
     <script language="javascript" type="text/javascript">
-      var url = "ws://192.168.4.1:80/ws";
+        var url = "ws://" + location.host + "/ws";
       var emergency_stop = false;
 
       // Cache views
@@ -462,6 +516,20 @@
       var maxBackwardInput;
       var saveButton;
       var output;
+
+      function debounce(fn) {
+        let lastParams = null;
+        let lastTime = 0;
+        return function (...args) {
+          const now = Date.now();
+          const paramsChanged = !lastParams || args.length !== lastParams.length || args.some((v, i) => v !== lastParams[i]);
+          if (paramsChanged || now - lastTime > 1000) {
+            fn(...args);
+            lastParams = args;
+            lastTime = now;
+          }
+        };
+      }
 
       function init() {
         loader = document.getElementById("loader");
@@ -477,7 +545,6 @@
         output = document.getElementById("output");
 
         initDrag();
-        initDpad();
 
         // Initial state
         isConnecting(true);
@@ -554,6 +621,17 @@
           maxBackwardInput.value = json.max_backward;
           document.getElementById("maxBackwardInputValue").innerHTML =
             json.max_backward;
+        }
+        if (json.rc_enabled !== undefined) {
+          if (json.rc_enabled) {
+            showJoystick();
+          } else {
+            hideJoystick();
+          }
+        }
+        if (json.rc_only !== undefined) {
+          showRcOnlyToggle();
+          setRcOnlyToggle(json.rc_only);
         }
       }
 
@@ -670,7 +748,7 @@
         );
       }
 
-      function onDirection(direction) {
+      function onDriveDirection(direction) {
         console.log("direction: "+direction);
         websocket.send(
           JSON.stringify({
@@ -679,6 +757,15 @@
         );
       }
 
+      function onTurnDirection(direction) {
+          console.log("direction: " + direction);
+          websocket.send(
+            JSON.stringify({
+              command: direction,
+            })
+          );
+        }
+
       function onTurnStop(direction) {
         console.log("stop turn");
         websocket.send(
@@ -686,49 +773,6 @@
             command: "stop_turn",
           })
         );
-      }
-
-      function initDpad(){
-        for (let direction in {"up":"", "down":"", "left":"", "right":""}){
-          console.log("dpad_"+direction);
-          document.getElementById("dpad_" + direction).addEventListener("contextmenu", function(e) {
-            e.preventDefault();
-            return false;
-          });
-          document.getElementById("dpad_"+direction).addEventListener("mousedown", function(){
-            onDirection(direction);
-          });
-          document.getElementById("dpad_"+direction).addEventListener("mouseup", function (){
-            if (direction in { "left": "", "right": "" })
-            {
-              onTurnStop();
-            } else {
-              onIdle();
-            }
-          });
-          document.getElementById("dpad_" + direction).addEventListener("touchstart", function () {
-            console.log("touchstart");
-            onDirection(direction);
-          });
-          document.getElementById("dpad_" + direction).addEventListener("touchend", function () {
-            console.log("touchend");
-            if (direction in { "left": "", "right": "" })
-            {
-              onTurnStop();
-            } else {
-              onIdle();
-            }
-          });
-          document.getElementById("dpad_" + direction).addEventListener("touchcancel", function () {
-            console.log("touchcancel");
-            if (direction in {"left":"", "right":""} ) 
-            {
-              onTurnStop();
-            } else {
-              onIdle();
-            }
-          });
-        }
       }
 
       function onPressSave(event) {
@@ -745,7 +789,17 @@
             },
           })
         );
-
+        // If rcOnlyToggle is visible, send rc_only command after update_max
+        var rcToggleContainer = document.getElementById('rcOnlyToggleContainer');
+        var rcToggle = document.getElementById('rcOnlyToggle');
+        if (rcToggleContainer && rcToggleContainer.style.display !== 'none' && rcToggle) {
+          websocket.send(
+            JSON.stringify({
+              command: "rc_only",
+              parameters: { setting: rcToggle.checked }
+            })
+          );
+        }
         return false;
       }
 
@@ -753,8 +807,95 @@
         document.getElementById(event.id + "Value").innerHTML = event.value;
       }
 
-      window.addEventListener("load", init, false);
+      // Joystick setup
+      var joystick;
+      var joystickManager;
+      var joystickInitialized = false;
+      var lastTurnDirection = null;
+      var lastDriveDirection = null;
+      var lastTurnTime = 0;
+      var lastDriveTime = 0;
+      function showJoystick() {
+        var joystickZone = document.getElementById('joystick_zone');
+        joystickZone.style.display = 'block';
+        if (!joystickInitialized) {
+          initJoystick();
+          joystickInitialized = true;
+        }
+      }
+      function hideJoystick() {
+        var joystickZone = document.getElementById('joystick_zone');
+        joystickZone.style.display = 'none';
+      }
+      function initJoystick() {
+        var joystickZone = document.getElementById('joystick_zone');
+        joystickManager = nipplejs.create({
+          zone: joystickZone,
+          mode: 'static',
+          position: { left: '50%', top: '50%' },
+          color: 'red',
+          size: 150
+        });
+        var debounceOnTurnDirection = debounce(onTurnDirection);
+        var debounceOnDriveDirection = debounce(onDriveDirection);
+        var debounceOnIdle = debounce(onIdle);
+        var debounceOnTurnStop = debounce(onTurnStop);
+        joystickManager.on('move', function (evt, data) {
+          if (data && data.direction && data.distance) {
+            let dirX = data.direction.x;
+            let dirY = data.direction.y;
+            let amplitudeX = Math.abs(data.vector.x);
+            let amplitudeY = Math.abs(data.vector.y);
+            // Only emit left/right if x amplitude is over 0.4
+            if ((dirX === 'left' || dirX === 'right')){
+              if (amplitudeX >= 0.4) {
+                debounceOnTurnDirection(dirX);
+              } else {
+                debounceOnTurnStop();
+              }
+            }
+            if ((dirY === 'up' || dirY === 'down')) {
+              if (amplitudeY >= 0.4) {
+                debounceOnDriveDirection(dirY);
+              } else {
+                debounceOnIdle();
+              }
+            }
+          }
+        });
+        joystickManager.on('end', function () {
+          onIdle();
+          onTurnStop();
+        });
+      }
+
+      function showRcOnlyToggle() {
+        var rcToggleContainer = document.getElementById('rcOnlyToggleContainer');
+        if (rcToggleContainer) rcToggleContainer.style.display = 'flex';
+      }
+      function hideRcOnlyToggle() {
+        var rcToggleContainer = document.getElementById('rcOnlyToggleContainer');
+        if (rcToggleContainer) rcToggleContainer.style.display = 'none';
+      }
+      function setRcOnlyToggle(value) {
+        var rcToggle = document.getElementById('rcOnlyToggle');
+        if (rcToggle) rcToggle.checked = !!value;
+      }
+      window.addEventListener("load", function() {
+        init();
+        // Do not initJoystick here, will be called when rc_enabled is true
+      }, false);
+      document.addEventListener('DOMContentLoaded', function() {
+        var rcToggle = document.getElementById('rcOnlyToggle');
+        var rcSlider = document.querySelector('#rcOnlyToggleContainer .toggle-slider');
+        if (rcSlider && rcToggle) {
+          rcSlider.addEventListener('click', function() {
+            rcToggle.checked = !rcToggle.checked;
+          });
+        }
+      });
     </script>
+    <script src="nipplejs.min.js"></script>
   </head>
   <body>
     <div id="loader">Connecting ...</div>
@@ -830,18 +971,10 @@
           />
         </svg>
       </div>
+      <div id="joystick_zone" style="width:200px;height:200px;margin:auto;position:relative;"></div>
       <!-- <div class="set setbg2 clear setbg clear"> -->
         <!-- <div class="set setbg white"> -->
-        <div class="set wire">
-        <nav class="o-pad">
-          <a id="dpad_up" class="up" href="#"></a>
-          <a id="dpad_right" class="right" href="#"></a>
-          <a id="dpad_down" class="down" href="#"></a>
-          <a id="dpad_left" class="left" href="#"></a>
-        </nav>
-      <br> 
-      <br>
-      <br>
+      <div class="set wire">
       <button id="stopButton" onclick="return onPressEmergencyStop(this)">
         Emergency Stop</button
       ><br />
@@ -868,11 +1001,18 @@
             class="slider"
             type="range"
             min="15"
-            max="40"
+            max="100"
             value="0"
             oninput="return onSliderInput(this)"
           />
           <div id="maxBackwardInputValue">0</div>
+        </div>
+        <div id="rcOnlyToggleContainer" class="slider_container">
+          <label class="slider_label">RC Only</label>
+          <span class="toggle-switch">
+            <input type="checkbox" id="rcOnlyToggle" />
+            <span class="toggle-slider"></span>
+          </span>
         </div>
         <button id="saveButton" onclick="return onPressSave(this)">Save</button
         ><br />

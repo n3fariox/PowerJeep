@@ -76,6 +76,8 @@ int led_sleep_delay = 20;
 bool rc_forward = false;
 bool rc_backward = false;
 float rc_steering = 0.0;
+bool rc_only = false; // If true, we don't use the gas pedal, only the RC control
+bool rc_enabled = true; // If true, we accept RC commands
 
 #if WITH_ADC_THROTTLE
 static esp_adc_cal_characteristics_t adc1_chars;
@@ -97,8 +99,21 @@ uint32_t adc_voltage = 0;
 //}
 void broadcast_all_values() {
   char *message;
-  char *format = "{\"current_speed\":%f,\"max_forward\":%f,\"max_backward\":%f,\"emergency_stop\":%s}";
-  asprintf(&message, format, current_speed, max_forward, max_backward, emergency_stop ? "true" : "false");
+  char *format = "{\"current_speed\":%f,"
+  "\"max_forward\":%f,"
+  "\"max_backward\":%f,"
+  "\"emergency_stop\":%s,"
+  "\"rc_enabled\":%s,"
+  "\"rc_only\":%s"
+  "}";
+  // char *format = "{\"current_speed\":%f,\"max_forward\":%f,\"max_backward\":%f,\"emergency_stop\":%s}";
+  asprintf(&message, format, 
+    current_speed,
+    max_forward,
+    max_backward,
+    emergency_stop ? "true" : "false",
+    rc_enabled ? "true" : "false",
+    rc_only ? "true" : "false");
   ESP_LOGI(TAG, "Send %s", message);
   broadcast_message(message);
   free(message);
@@ -152,6 +167,22 @@ static void data_received(httpd_ws_frame_t* ws_pkt) {
     broadcast_all_values();
   } else if (strcmp("read", command) == 0) {
     broadcast_all_values();
+  } else if (strcmp("rc_only", command) == 0) {
+    cJSON *parameters = cJSON_GetObjectItem(root, "parameters");
+    if (parameters == NULL)
+    {
+      goto end;
+    }
+    cJSON *is_enabled = cJSON_GetObjectItem(parameters, "setting");
+    if (!cJSON_IsBool(is_enabled))
+    {
+      goto end;
+    }
+    // Set values in memory for immediate use, it doesn't survive restarts
+    rc_enabled = cJSON_IsTrue(is_enabled);
+
+    // Broadcast new values to all listeners
+    broadcast_all_values();
   } else if (strcmp("emergency_stop", command) == 0) {
     cJSON* parameters = cJSON_GetObjectItem(root, "parameters");
     if (parameters == NULL) {
@@ -166,32 +197,43 @@ static void data_received(httpd_ws_frame_t* ws_pkt) {
 
     // Broadcast new values to all listeners
     broadcast_all_values();
-
+}
+else if (strcmp("idle", command) == 0)
+{
+  rc_forward = false;
+  rc_backward = false;
+}
+else if (strcmp("stop_turn", command) == 0)
+{
+  rc_steering = 0;
+}
+else if (strcmp("up", command) == 0)
+{
+  rc_forward = true;
+  rc_backward = false;
+}
+else if (strcmp("down", command) == 0)
+{
+  rc_forward = false;
+  rc_backward = true;
+}
+else if (strcmp("right", command) == 0)
+{
+  rc_steering = 1.0;
+  // if (steering < 1.0)
+  // {
+  //   steering += .1;
+  // }
+}
+else if (strcmp("left", command) == 0)
+{
+  rc_steering = -1.0;
+  // if (steering > -1.0) {
+  //   steering -= .1;
+  // }
+}
 end:
-    cJSON_Delete(root);
-  } else if ( strcmp("idle", command) == 0 ) {
-    rc_forward = false;
-    rc_backward = false;
-  } else if (strcmp("stop_turn", command) == 0) {
-    rc_steering = 0;
-  } else if (strcmp("up", command) == 0) {
-    rc_forward = true;
-    rc_backward = false;
-  }  else if (strcmp("down", command) == 0) {
-    rc_forward = false;
-    rc_backward = true;
-  } else if (strcmp("right", command) == 0) {
-      rc_steering = 1.0;
-      // if (steering < 1.0)
-      // {
-      //   steering += .1;
-      // }
-  } else if (strcmp("left", command) == 0) {
-    rc_steering = -1.0;
-    // if (steering > -1.0) {
-    //   steering -= .1;
-    // }
-  }
+  cJSON_Delete(root);
 }
 
 // Make sure we stop the RC control if we disconnect
