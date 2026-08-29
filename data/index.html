@@ -514,6 +514,7 @@
       var stopButton;
       var maxForwardInput;
       var maxBackwardInput;
+      var pwmFrequencyInput;
       var saveButton;
       var output;
 
@@ -541,6 +542,7 @@
         stopButton = document.getElementById("stopButton");
         maxForwardInput = document.getElementById("maxForwardInput");
         maxBackwardInput = document.getElementById("maxBackwardInput");
+        pwmFrequencyInput = document.getElementById("pwmFrequencyInput");
         saveButton = document.getElementById("saveButton");
         output = document.getElementById("output");
 
@@ -621,6 +623,11 @@
           maxBackwardInput.value = json.max_backward;
           document.getElementById("maxBackwardInputValue").innerHTML =
             json.max_backward;
+        }
+        if (json.pwm_frequency != undefined) {
+          pwmFrequencyInput.value = json.pwm_frequency;
+          document.getElementById("pwmFrequencyInputValue").innerHTML =
+            json.pwm_frequency;
         }
         if (json.rc_enabled !== undefined) {
           if (json.rc_enabled) {
@@ -776,7 +783,11 @@
       }
 
       function onPressSave(event) {
-        if (isNaN(maxForwardInput.value) || isNaN(maxBackwardInput.value)) {
+        if (
+          isNaN(maxForwardInput.value) ||
+          isNaN(maxBackwardInput.value) ||
+          isNaN(pwmFrequencyInput.value)
+        ) {
           output.innerHTML = "Error, not a number";
           return false;
         }
@@ -786,6 +797,14 @@
             parameters: {
               max_forward: parseInt(maxForwardInput.value),
               max_backward: parseInt(maxBackwardInput.value),
+            },
+          })
+        );
+        websocket.send(
+          JSON.stringify({
+            command: "set_freq",
+            parameters: {
+              pwm_frequency: parseInt(pwmFrequencyInput.value),
             },
           })
         );
@@ -1006,6 +1025,21 @@
             oninput="return onSliderInput(this)"
           />
           <div id="maxBackwardInputValue">0</div>
+        </div>
+
+        <div class="slider_container">
+          <div class="slider_label">PWM Frequency (Hz)</div>
+          <input
+            id="pwmFrequencyInput"
+            class="slider"
+            type="range"
+            min="2000"
+            max="20000"
+            step="500"
+            value="8000"
+            oninput="return onSliderInput(this)"
+          />
+          <div id="pwmFrequencyInputValue">8000</div>
         </div>
         <div id="rcOnlyToggleContainer" class="slider_container">
           <label class="slider_label">RC Only</label>

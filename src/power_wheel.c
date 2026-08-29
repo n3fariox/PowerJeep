@@ -21,6 +21,8 @@ static void drive_task(void *pvParameter);
 static void broadcast_speed_task(void *pvParameter);
 static void led_task(void *pvParameter);
 
+int set_pwm_frequency(uint32_t hz);
+
 // ADC throttle capability
 
 #define WITH_ADC_THROTTLE 1
@@ -66,8 +68,14 @@ static void led_task(void *pvParameter);
 #define MOTOR_PWM_CHANNEL_RIGHT LEDC_CHANNEL_4
 #define MOTOR_PWM_TIMER LEDC_TIMER_1
 #define MOTOR_PWM_DUTY_RESOLUTION LEDC_TIMER_10_BIT
+#define PWM_FREQ_MIN 2000
+#define PWM_FREQ_MAX 20000
+#define PWM_FREQ_DEFAULT 8000
 
 // Variables in memory
+
+uint32_t pwm_frequency = PWM_FREQ_DEFAULT;     // Current frequency applied to the timers
+uint32_t pwm_frequency_pending = 0;            // Non-zero = freq requested but deferred (car moving)
 
 float current_speed = 0;
 float emergency_stop = false;
@@ -107,7 +115,9 @@ void broadcast_all_values()
                  "\"max_backward\":%f,"
                  "\"emergency_stop\":%s,"
                  "\"rc_enabled\":%s,"
-                 "\"rc_only\":%s"
+                 "\"rc_only\":%s,"
+                 "\"pwm_frequency\":%u,"
+                 "\"pwm_frequency_pending\":%s"
                  "}";
   // char *format = "{\"current_speed\":%f,\"max_forward\":%f,\"max_backward\":%f,\"emergency_stop\":%s}";
   asprintf(&message, format,
@@ -116,7 +126,9 @@ void broadcast_all_values()
            max_backward,
            emergency_stop ? "true" : "false",
            rc_enabled ? "true" : "false",
-           rc_only ? "true" : "false");
+           rc_only ? "true" : "false",
+           pwm_frequency,
+           pwm_frequency_pending ? "true" : "false");
   ESP_LOGI(TAG, "Send %s", message);
   broadcast_message(message);
   free(message);
@@ -210,6 +222,26 @@ static void data_received(httpd_ws_frame_t *ws_pkt)
     }
     // Set values in memory for immediate use, it doesn't survive restarts
     emergency_stop = cJSON_IsTrue(is_enabled);
+
+    // Broadcast new values to all listeners
+    broadcast_all_values();
+  }
+  else if (strcmp("set_freq", command) == 0)
+  {
+    cJSON *parameters = cJSON_GetObjectItem(root, "parameters");
+    if (parameters == NULL)
+    {
+      goto end;
+    }
+
+    cJSON *pwm_frequency_node = cJSON_GetObjectItem(parameters, "pwm_frequency");
+    if (!cJSON_IsNumber(pwm_frequency_node))
+    {
+      goto end;
+    }
+
+    // Bounded here (and again inside set_pwm_frequency) to protect against bad input
+    set_pwm_frequency((uint32_t)pwm_frequency_node->valuedouble);
 
     // Broadcast new values to all listeners
     broadcast_all_values();
@@ -372,14 +404,44 @@ void setup_pwm()
   ledc_timer.speed_mode = LEDC_HIGH_SPEED_MODE;
   ledc_timer.duty_resolution = MOTOR_PWM_DUTY_RESOLUTION;
   ledc_timer.timer_num = MOTOR_PWM_TIMER;
-  ledc_timer.freq_hz = 15000;
-  // ledc_timer.freq_hz = 25000;
+  ledc_timer.freq_hz = pwm_frequency;
 
   ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
   ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel_forward));
   ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel_backward));
   ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel_left));
   ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel_right));
+}
+
+// Request a new PWM frequency. It is bounded on the ESP side (not just the client).
+// For safety it only takes effect while the car is stopped. If the car is moving, the
+// request is stored in memory and applied the moment the speed reaches 0.
+// Returns 1 if applied immediately, 0 if deferred.
+int set_pwm_frequency(uint32_t hz)
+{
+  // Clamp to the safe operating range regardless of what the client sent
+  if (hz < PWM_FREQ_MIN)
+  {
+    hz = PWM_FREQ_MIN;
+  }
+  else if (hz > PWM_FREQ_MAX)
+  {
+    hz = PWM_FREQ_MAX;
+  }
+
+  if (current_speed != 0)
+  {
+    // Car is moving, defer the change
+    pwm_frequency_pending = hz;
+    ESP_LOGI(TAG, "PWM freq %u Hz deferred until car stops", hz);
+    return 0;
+  }
+
+  pwm_frequency = hz;
+  pwm_frequency_pending = 0;
+  ESP_ERROR_CHECK(ledc_set_freq(LEDC_HIGH_SPEED_MODE, MOTOR_PWM_TIMER, hz));
+  ESP_LOGI(TAG, "PWM freq set to %u Hz", hz);
+  return 1;
 }
 
 void setup_driving(void)
@@ -628,6 +690,12 @@ static void drive_task(void *pvParameter)
 
       send_values_to_motor(current_speed);
 
+      // The car is stopped, apply any deferred PWM frequency change now
+      if (pwm_frequency_pending)
+      {
+        set_pwm_frequency(pwm_frequency_pending);
+      }
+
       last_update = esp_timer_get_time();
 
       blink_led_emergency_stop();
@@ -673,6 +741,12 @@ static void drive_task(void *pvParameter)
 
     // Compute next speed based on current speed and targeted speed
     current_speed = compute_next_speed(current_speed, target, delta);
+
+    // If the car has come to a stop, apply any deferred PWM frequency change
+    if (current_speed == 0 && pwm_frequency_pending)
+    {
+      set_pwm_frequency(pwm_frequency_pending);
+    }
 
     // Decide if we want to enable the rc motor or not
     if (rc_steering < 0.1 && rc_steering > -0.1)
