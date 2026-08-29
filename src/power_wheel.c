@@ -191,7 +191,7 @@ static void data_received(httpd_ws_frame_t *ws_pkt)
       goto end;
     }
     // Set values in memory for immediate use, it doesn't survive restarts
-    rc_enabled = cJSON_IsTrue(is_enabled);
+    rc_only = cJSON_IsTrue(is_enabled);
 
     // Broadcast new values to all listeners
     broadcast_all_values();
@@ -637,7 +637,12 @@ static void drive_task(void *pvParameter)
     }
 
     // Update pedal & direction status
-    if (rc_forward)
+    if (rc_only)
+    {
+      forward_position = rc_forward ? 100 : 0;
+      backward_position = rc_backward ? 100 : 0;
+    }
+    else if (rc_forward)
     {
       forward_position = 100;
       backward_position = 0;
